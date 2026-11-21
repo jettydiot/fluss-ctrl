@@ -10,7 +10,8 @@ fast-check property tests; time-dependent code uses the injected clock; no `.ski
 | 1a | Property-based | fast-check in Vitest | `pnpm test:unit` | arrives with the first parser or grant logic |
 | 2 | Contract (routes vs committed `openapi.json`) | Vitest, oasdiff, Spectral | `pnpm test:unit`; oasdiff and Spectral in CI | needs OpenAPI generation (#7); oasdiff and Spectral jobs arrive with #7 |
 | 3 | Provider conformance (simulator) | Vitest (`packages/conformance`) | `pnpm test:unit` | skeleton in #8 |
-| 4 | Integration (real Postgres) | Vitest + Testcontainers, `@cloudflare/vitest-pool-workers` | `pnpm test:integration` (Docker) | ✅ runs in CI (`integration` job); no suites until #5 |
+| 4 | Integration (real Postgres) | Vitest + Testcontainers | `pnpm test:integration` (Docker) | ✅ runs in CI (`integration` job); no suites until #5 |
+| 4 | Integration (Cloudflare bindings: Durable Objects, KV, Queues) | Vitest + `@cloudflare/vitest-plugin` (Miniflare/workerd) | `pnpm test:unit` (no Docker) | ✅ every `apps/api` test runs inside workerd with the bindings from `apps/api/wrangler.jsonc`; remote bindings are off |
 | 5 | E2E against the PR preview | Playwright | `pnpm test:e2e` (`$PREVIEW_URL`) | not yet implemented (#9) |
 | 6 | Smoke (end of every deploy) | the Playwright suite | run by the deploy workflow | #9, #10 |
 | 7 | Synthetic monitoring | OpenStatus, scheduled GitHub Action | none locally | later phase |
@@ -20,7 +21,7 @@ fast-check property tests; time-dependent code uses the injected clock; no `.ski
 | 11 | Regression | any layer above | — | every bug fix |
 | 12 | Migrations | squawk, previous release's suite | CI | ✅ `squawk` job lints changed `packages/db/**.sql` (no-op until #5); previous-release suite later |
 | 13 | Docs as tests | quickstart snippets | `pnpm test:docs` (`$PREVIEW_URL`) | not yet implemented (#9) |
-| 15 | Architecture | dependency-cruiser | `pnpm lint` (runs `pnpm lint:deps`) | ✅ routes → core → db; providers never import db |
+| 15 | Architecture | dependency-cruiser | `pnpm lint` (runs `pnpm lint:deps`) | ✅ routes → core → db; providers never import db; only `apps/api/src/platform` imports `cloudflare:*` (plus an ESLint rule on the ambient binding types) |
 
 Items 14 (restore drill), 16 (portability), 17 (DR drills), 18 (hardware canary) and 19 (vendor
 contract drift) are scheduled jobs or later-phase work and have no local command.
@@ -69,4 +70,6 @@ pnpm test:unit && node scripts/coverage-changed-lines.mjs --lcov coverage/lcov.i
 - Put unit tests next to the code: `src/thing.ts` and `src/thing.test.ts`.
 - Each workspace has a `vitest.config.ts` (`defineProject`); the root config runs them all.
 - Integration tests use a real Postgres via Testcontainers, never a mocked database.
+- `apps/api` tests run inside workerd. Use `env` from `cloudflare:test` for bindings, and
+  `evictDurableObject` to prove a Durable Object continues from storage alone after a restart.
 - Tests never call a vendor cloud, the live Fluss backend or a real device.

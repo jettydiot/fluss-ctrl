@@ -9,3 +9,4 @@ export { createIdGenerator, ID_PREFIXES, idTimestamp, isId, newId } from './ids.
 export type { Id, IdGeneratorDeps, IdPrefix } from './ids.ts'
 export * from './provider.ts'
 export { REDACTED, redact, redactString } from './redact.ts'
+export * from './platform/index.ts'

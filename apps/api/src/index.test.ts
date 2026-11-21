@@ -1,8 +1,9 @@
+import { env } from 'cloudflare:test'
 import { ApiError, isId } from '@flussctrl/core'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { app, createApp } from './index.ts'
 
-const goodEnv = { ENVIRONMENT: 'dev' }
+const goodEnv = { ...env, ENVIRONMENT: 'dev' }
 
 afterEach(() => {
   vi.restoreAllMocks()

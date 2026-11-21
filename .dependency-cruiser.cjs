@@ -46,6 +46,20 @@ module.exports = {
       to: { path: '^apps/' },
     },
     {
+      name: 'cloudflare-only-in-platform',
+      severity: 'error',
+      comment: 'SPEC §11 item 16, §21.3: only apps/api/src/platform touches Cloudflare (the cloudflare:* runtime modules and the Workers types). Everything else uses the Queue, Coordinator, Cache and RateLimiter ports in packages/core. Test files are covered by the next rule.',
+      from: { path: '^(apps|packages)/', pathNot: ['^apps/api/src/platform/', '\\.test\\.ts$'] },
+      to: { path: ['^cloudflare:', '^@cloudflare/workers-types'] },
+    },
+    {
+      name: 'cloudflare-tests-only-test-module',
+      severity: 'error',
+      comment: 'Tests outside apps/api/src/platform may use the Workers test pool (cloudflare:test) and nothing else from Cloudflare.',
+      from: { path: '\\.test\\.ts$', pathNot: '^apps/api/src/platform/' },
+      to: { path: ['^cloudflare:', '^@cloudflare/workers-types'], pathNot: '^cloudflare:test$' },
+    },
+    {
       name: 'not-to-unresolvable',
       severity: 'error',
       comment: 'Every import must resolve.',
@@ -60,6 +74,8 @@ module.exports = {
     tsConfig: { fileName: 'tsconfig.base.json' },
     combinedDependencies: true,
     preserveSymlinks: false,
+    // The Workers runtime's own modules, resolved by workerd, not from node_modules.
+    builtInModules: { add: ['cloudflare:workers', 'cloudflare:sockets', 'cloudflare:email', 'cloudflare:test'] },
     enhancedResolveOptions: {
       exportsFields: ['exports'],
       conditionNames: ['import', 'types', 'default'],

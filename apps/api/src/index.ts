@@ -3,8 +3,11 @@ import { Hono, type Context } from 'hono'
 import type { ContentfulStatusCode } from 'hono/utils/http-status'
 import { ConfigError, loadEnv, type Env } from './env.ts'
 import { log } from './log.ts'
+import { createPlatform, type Platform } from './platform/index.ts'
 
-type AppEnv = { Bindings: Record<string, unknown>, Variables: { config: Env, requestId: string } }
+export { DeviceCoordinator, TokenBucketLimiter } from './platform/index.ts'
+
+type AppEnv = { Bindings: Record<string, unknown>, Variables: { config: Env, platform: Platform, requestId: string } }
 
 function problem (c: Context<AppEnv>, code: ErrorCode, body = problemDetails(code, c.get('requestId'))): Response {
   return c.json(body, body.status as ContentfulStatusCode, { 'Content-Type': 'application/problem+json' })
@@ -28,6 +31,8 @@ export function createApp (): Hono<AppEnv> {
   // environment validates.
   app.use('*', async (c, next) => {
     c.set('config', loadEnv(c.env))
+    // Routes reach queues, coordinators, the cache and rate limits only through these ports.
+    c.set('platform', createPlatform(c.env))
     await next()
   })
 

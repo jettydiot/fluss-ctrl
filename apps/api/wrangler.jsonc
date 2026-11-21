@@ -1,5 +1,6 @@
-// Local development only (`pnpm dev`). Per-environment configs for preview, staging and
-// production live in /infra/wrangler and are applied from CI (#9, #10), never from a session.
+// Local development only (`pnpm dev`) and the Workers test pool. Per-environment configs for
+// preview, staging and production live in /infra/wrangler and are applied from CI (#9, #10), never
+// from a session.
 {
   "$schema": "../../node_modules/wrangler/config-schema.json",
   "name": "fluss-ctrl-api-dev",
@@ -7,6 +8,22 @@
   "compatibility_date": "2026-11-01",
   "compatibility_flags": ["nodejs_compat"],
   "vars": {
-    "ENVIRONMENT": "dev"
-  }
+    "ENVIRONMENT": "dev",
+    // Beside Neon us-east-1 (SPEC §9). Honoured only on an object's first get().
+    "DO_LOCATION_HINT": "enam"
+  },
+  "durable_objects": {
+    "bindings": [
+      { "name": "DEVICE_COORDINATOR", "class_name": "DeviceCoordinator" },
+      { "name": "RATE_LIMITER", "class_name": "TokenBucketLimiter" }
+    ]
+  },
+  // SQLite-backed storage (ADR-0003). A class's storage backend cannot change once deployed.
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["DeviceCoordinator", "TokenBucketLimiter"] }
+  ],
+  "kv_namespaces": [
+    // Local id only; Miniflare keeps the data on disk under .wrangler/.
+    { "binding": "CACHE", "id": "fluss-ctrl-dev-cache" }
+  ]
 }
