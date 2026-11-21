@@ -1,6 +1,6 @@
 {
-  "apps/api": "0.0.0",
-  "apps/docs": "0.0.0",
+  "apps/api": "1.0.0",
+  "apps/docs": "1.0.0",
   "apps/cli": "0.0.0",
   "packages/webhooks": "0.0.0"
 }

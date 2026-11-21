@@ -1,6 +1,6 @@
 {
   "name": "@flussctrl/api",
-  "version": "0.0.0",
+  "version": "1.0.0",
   "description": "Fluss Ctrl API: Hono on Cloudflare Workers.",
   "private": true,
   "type": "module",
