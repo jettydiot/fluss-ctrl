@@ -17,7 +17,7 @@ This spec describes all of v1, but v1 is built in phases (PLAN §7). Build only 
 | 4 (Mar 2027) | Emergency modes (§4 Emergency, and every `emergency`, `egress` and `hold` item elsewhere); admin web UI and metrics feed (§13.2); self-serve payment (§15); TypeScript SDK |
 | Post-launch | MCP server and delegated OAuth (§3.1, §19); connectors (`POST /connectors`, `lock`/`unlock`); Comb; Postgres-backed platform adapters and break-glass container (§21.3); billing automation (§15); Python and C# SDKs; everything in §20 |
 
-Tables by phase (§5): 0–1 `organisations`, `clients`, `client_secrets`, members, `sites`, `providers`, `controllers`, `devices`, `device_groups`, `subjects`, `grants`, `commands`, `events`, `ingested_refs`, `webhook_endpoints`, `webhook_deliveries`, `idempotency_keys`, `audit_log`; 2 `provider_links`; 3 `usage_daily`; 4 `site_emergencies`, `metrics_daily`, `org_notes`, `invoices`, `payments` and the emergency columns (`sites.emergency_config`, `devices.egress`, `grants.emergency_exempt`, `commands.emergency_id`); post-launch `connectors`, `billing_adjustments`.
+Tables by phase (§5): 0–1 `organisations`, `clients`, `client_secrets`, members (`org_members` only; the Better Auth tables arrive with console auth in Phase 2), `sites`, `providers`, `controllers`, `devices`, `device_groups`, `subjects`, `grants`, `commands`, `events`, `ingested_refs`, `webhook_endpoints`, `webhook_deliveries`, `idempotency_keys`, `audit_log`; 2 `provider_links` and the Better Auth tables; 3 `usage_daily` and the billing columns (`organisations.plan`, `price_per_device_month`, `billing_provider`); 4 `site_emergencies`, `metrics_daily`, `org_notes`, `invoices`, `payments` and the emergency columns (`sites.emergency_config`, `devices.egress`, `grants.emergency_exempt`, `commands.emergency_id`); post-launch `connectors`, `billing_adjustments`.
 
 ## 1. Conventions
 
@@ -26,7 +26,7 @@ Tables by phase (§5): 0–1 `organisations`, `clients`, `client_secrets`, membe
 - IDs: prefixed, URL-safe, globally unique: `org_…`, `site_…`, `ctl_…`, `dev_…`, `grp_…`, `sub_…`, `grt_…`, `cmd_…`, `evt_…`, `whk_…`, `cli_…`, `emg_…`. Use UUIDv7 under the prefix (sortable).
 - Timestamps: RFC 3339 UTC (`2026-10-14T12:00:00Z`). Durations in seconds. Schedules carry an IANA timezone.
 - Versioning: path (`/v1`). Additive changes do not bump. Breaking changes → `/v2` with a 12-month overlap. `oasdiff` enforces this in CI.
-- Idempotency: `Idempotency-Key` header (UUID) is **required** on `POST /devices/{id}/commands` and accepted on all other POSTs. Keys are scoped to the client. For commands the key lives on the command itself (`UNIQUE(client_id, idempotency_key)`), so it is honoured for as long as the command is retained (90 days, §14): a replay never actuates twice and returns the **current** state of the original command with `Idempotent-Replayed: true` (and honours `?wait=`). For other POSTs the response is stored for 24 h (`idempotency_keys`) and replayed as it was. The same key with a different request body is `422 idempotency_key_reused`; a replay that arrives while the original is still being accepted is `409 idempotency_in_progress`.
+- Idempotency: `Idempotency-Key` header (UUID) is **required** on `POST /devices/{id}/commands` and accepted on all other POSTs. Keys are scoped to the client. For commands the key lives on the command itself (`UNIQUE(org_id, client_id, idempotency_key)`), so it is honoured for as long as the command is retained (90 days, §14): a replay never actuates twice and returns the **current** state of the original command with `Idempotent-Replayed: true` (and honours `?wait=`). For other POSTs the response is stored for 24 h (`idempotency_keys`) and replayed as it was. The same key with a different request body is `422 idempotency_key_reused`; a replay that arrives while the original is still being accepted is `409 idempotency_in_progress`.
 - Pagination: cursor-based. `?limit=` (default 50, max 200) and `?cursor=`. Responses: `{ "data": [...], "next_cursor": "…" | null }`.
 - Filtering: documented per list endpoint; always supports `?site_id=`.
 - Errors (RFC 9457 problem details):
@@ -239,14 +239,23 @@ Two modes, one active emergency per site at a time. Both are control-room featur
 
 Every table: `id`, `created_at`, `updated_at`; soft-delete via `archived_at` where noted. All org-scoped tables carry `org_id` and every query filters by it (enforced by a repository layer; no raw access from routes). Row-level security as a second line of defence: the API connects as a role that neither owns the tables nor has `BYPASSRLS`, and sets the org context with `set_config('app.org_id', …, true)` inside each transaction (Hyperdrive resets session state when a connection goes back to the pool, so a session-level `SET` cannot be relied on). Migrations run as a separate owner role over a direct connection, not through Hyperdrive. Tables are created in the phase that first uses them (§0).
 
+How this is built (issue #5, ADR-0003):
+- Every table except `organisations` (whose policy reads `id`) and the global `providers` catalogue carries `org_id`, including child tables that could reach it through a parent (`client_secrets`, `idempotency_keys`, `ingested_refs`, `webhook_deliveries`), so that every table has the same one-line policy: `org_id = current_setting('app.org_id', true)`, for reads and writes, with RLS enabled and forced. With no context set a query sees no rows.
+- Foreign-key checks bypass RLS, so every reference between org-scoped tables is a composite key on `(org_id, <column>)` to the parent's `(org_id, id)`: a row can only point at a row of its own organisation, and a failed reference reveals nothing about other organisations. For the same reason `org_id` leads every unique key that contains such a reference (`UNIQUE(org_id, controller_id, channel)`, `UNIQUE(org_id, client_id, idempotency_key)`, and the `idempotency_keys` and `ingested_refs` primary keys), so a duplicate-key error cannot reveal another organisation's row either. Uniqueness is unchanged, because the referenced row belongs to one organisation. The planned `device_shares` (§2, v1.1) relaxes the device references on grants and commands when it lands.
+- The API's database role is a member of `fluss_app`: no `BYPASSRLS`, DML only where the API needs it, append-only on `events` (except the pseudonymisation columns, §14) and `audit_log`, read-only on `providers`, and no privilege on any partition, so partitioned rows are reachable only through the parent and its policy.
+- Work that must cross organisations (the token endpoint finding a client before it knows the org, the outbox sweep, retention and reconciliation crons) does not get a bypass role. The issue that builds each one adds a narrow `SECURITY DEFINER` function that returns only the columns it needs.
+- Status-like columns are `text` with a `CHECK`, not enum types, so adding a value is an ordinary expand-only migration. Ids are the prefixed `text` ids of §1.
+- `events` and `webhook_deliveries` keep no foreign keys into or out of the partitioned log other than to `organisations` (and a delivery's endpoint): the log outlives the commands it mentions (§14). A delivery carries `event_recorded_at` so its event lookup prunes to one partition.
+
 ```
 organisations   id, name, region, status (trial|active|overdue|read_only|suspended|churned), plan, price_per_device_month,
                 retention_days (default 365), billing_provider, token_epoch int, settings jsonb (entitlements),
+                -- plan, price_per_device_month and billing_provider arrive in Phase 3 (§0)
                 sandbox_of (org id | null; set on the paired sandbox org, §1)
 clients         id, org_id, name, env (live|sandbox; follows the owning org), default_scopes text[], status, created_by,
                 allow_anonymous_commands bool
-client_secrets  id, client_id, hash, salt, last_used_at, revoked_at, expires_at
-members         (Better Auth tables) + org_members(user_id, org_id, role)
+client_secrets  id, org_id, client_id, hash, salt, last_used_at, revoked_at, expires_at
+members         (Better Auth tables, Phase 2) + org_members(user_id, org_id, role)
 sites           id, org_id, name, address, timezone, emergency_config jsonb, metadata, archived_at
 providers       code, name, onboarding_mode, enabled, config_schema jsonb
 provider_links  id, org_id, site_id, provider, status (pending_challenge|active|needs_reauth|revoked),
@@ -264,7 +273,7 @@ controllers     id, org_id, site_id, provider, provider_ref (vendor's unit id), 
 devices         id, org_id, site_id, controller_id, channel (provider-defined, e.g. `main`, `io:1`, `button:2`),
                 channel_role (main|pedestrian|switch|other|null), group_id,
                 name, kind, egress bool, controls jsonb, capabilities jsonb, last_status jsonb, metadata, archived_at
-                UNIQUE(controller_id, channel)
+                UNIQUE(org_id, controller_id, channel)
                 -- the access point platforms talk to; `online` is derived from the controller.
 device_groups   id, org_id, site_id, name, metadata, archived_at
 subjects        id, org_id, external_id, name, phone, email, metadata, erased_at
@@ -276,7 +285,7 @@ grants          id, org_id, site_id, subject_id, device_id|null, group_id|null, 
 commands        id, org_id, site_id, device_id, subject_id, grant_id, action, params jsonb,
                 state, verification_level, requested_at, sent_at, acked_at, completed_at,
                 outcome jsonb, error_code, idempotency_key, client_id, actor jsonb (human/agent), emergency_id
-                UNIQUE(client_id, idempotency_key)
+                UNIQUE(org_id, client_id, idempotency_key)
 events          id, org_id, site_id, device_id, subject_id, grant_id, command_id, type, method,
                 result, occurred_at, recorded_at, data jsonb, pseudonymised_at
                 PRIMARY KEY (id, recorded_at); PARTITION BY RANGE (recorded_at), monthly, plus a default partition;
@@ -284,16 +293,16 @@ events          id, org_id, site_id, device_id, subject_id, grant_id, command_id
                 (org_id, occurred_at)
                 -- `recorded_at` is the time inside the UUIDv7 id, so a lookup by id prunes to one partition.
                 -- `occurred_at` is device-reported and can be late or wrong: data, never a partition key.
-ingested_refs   controller_id, provider_event_ref, event_id, recorded_at
-                PRIMARY KEY (controller_id, provider_event_ref)   (ingest dedup, §8.1; pruned after 90 days)
+ingested_refs   org_id, controller_id, provider_event_ref, event_id, recorded_at
+                PRIMARY KEY (org_id, controller_id, provider_event_ref)   (ingest dedup, §8.1; pruned after 90 days)
 webhook_endpoints id, org_id, url, secret_hash, previous_secret_hash, previous_secret_expires_at,
                 event_types text[], status, failure_count, description
 site_emergencies id, org_id, site_id, mode, started_at, ended_at, reason, started_by, ended_by,
                 config_snapshot jsonb, outcome jsonb (per device)
-webhook_deliveries id, endpoint_id, event_id, attempt, status (pending|queued|delivered|failed|dead), response_code, next_attempt_at,
-                last_error, delivered_at  (partitioned monthly; 90-day retention)
+webhook_deliveries id, org_id, endpoint_id, event_id, event_recorded_at, attempt, status (pending|queued|delivered|failed|dead), response_code, next_attempt_at,
+                last_error, delivered_at  (partitioned monthly on created_at; 90-day retention)
                 -- written `pending` in the same transaction as the event (outbox, §8.2)
-idempotency_keys client_id, key, request_hash, response jsonb, expires_at   (non-command POSTs, 24 h; a command carries its own key)
+idempotency_keys org_id, client_id, key, request_hash, response jsonb, expires_at   (non-command POSTs, 24 h; a command carries its own key)
 usage_daily     org_id, day, device_months_fraction, controller_months_fraction, command_count, event_count
 metrics_daily   day, org_id|null, provider|null, metric, value   (rollups for the admin dashboard and the metrics feed)
 invoices        id, org_id, period_start, period_end, device_months, amount, currency, status (draft|sent|paid|overdue|void),

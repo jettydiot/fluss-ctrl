@@ -1,0 +1,4 @@
+# squawk (SPEC §11 item 12). Drizzle's migrator applies every pending migration inside one
+# transaction (packages/db/migrations/README.md), so squawk may assume it: rules about locking
+# tables that already carry traffic do not fire for a table created earlier in the same file.
+assume_in_transaction = true

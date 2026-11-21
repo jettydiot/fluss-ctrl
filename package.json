@@ -18,8 +18,8 @@
     "lint:deps": "depcruise apps packages --config .dependency-cruiser.cjs",
     "typecheck": "tsc -p tsconfig.json && turbo run typecheck",
     "openapi": "node scripts/not-yet-implemented.mjs openapi \"OpenAPI generation from routes\" 7",
-    "db:generate": "node scripts/not-yet-implemented.mjs db:generate \"Drizzle schema and migrations\" 5",
-    "db:migrate:dev": "node scripts/not-yet-implemented.mjs db:migrate:dev \"Drizzle schema and migrations\" 5"
+    "db:generate": "pnpm --filter @flussctrl/db db:generate",
+    "db:migrate:dev": "pnpm --filter @flussctrl/db db:migrate:dev"
   },
   "devDependencies": {
     "@commitlint/cli": "21.2.4",

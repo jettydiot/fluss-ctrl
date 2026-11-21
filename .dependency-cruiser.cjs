@@ -32,6 +32,13 @@ module.exports = {
       to: { path: '^packages/core/' },
     },
     {
+      name: 'only-db-to-drizzle',
+      severity: 'error',
+      comment: 'Every query goes through the org-scoped repositories in packages/db (SPEC §5, issue #5): nothing else imports Drizzle or the Postgres driver.',
+      from: { pathNot: '^packages/db/' },
+      to: { path: 'node_modules/(drizzle-orm|drizzle-kit|postgres)/' },
+    },
+    {
       name: 'providers-not-to-db',
       severity: 'error',
       comment: 'Providers never import db (SPEC §10).',
@@ -55,7 +62,8 @@ module.exports = {
   ],
   options: {
     doNotFollow: { path: 'node_modules' },
-    exclude: { path: '(^|/)(node_modules|dist|coverage|\\.wrangler|\\.turbo)/' },
+    // node_modules is not followed but stays visible, so rules can name packages (only-db-to-drizzle).
+    exclude: { path: '(^|/)(dist|coverage|\\.wrangler|\\.turbo)/' },
     tsPreCompilationDeps: true,
     tsConfig: { fileName: 'tsconfig.base.json' },
     combinedDependencies: true,

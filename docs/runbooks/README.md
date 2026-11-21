@@ -15,9 +15,13 @@ A runbook is written for someone tired, at 03:00, who did not build the thing. E
 6. **Afterwards:** who to tell, what to record, whether a postmortem is due
    ([`../postmortem-template.md`](../postmortem-template.md)).
 
+## Runbooks
+
+- [Database: roles and partitions](database.md)
+
 ## Planned runbooks (SPEC §16)
 
-None exist yet. Each is written by the issue that introduces what it operates.
+Each is written by the issue that introduces what it operates.
 
 - Incident response
 - Provider outage
