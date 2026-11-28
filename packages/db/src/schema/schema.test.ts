@@ -44,4 +44,13 @@ describe('schema', () => {
     expect(pk).toEqual(['id', 'recorded_at'])
     expect(pk).not.toContain('occurred_at')
   })
+
+  it('stores the webhook signing secret encrypted and no longer requires its hash (issue #28)', () => {
+    const endpoints = tables.find((t) => t.name === 'webhook_endpoints')!
+    const column = (name: string) => endpoints.columns.find((c) => c.name === name)
+    expect(column('secret_enc')?.getSQLType()).toBe('text')
+    expect(column('previous_secret_enc')?.getSQLType()).toBe('text')
+    // Unused since #28 and dropped by a later release (#46): the default lets an insert omit it.
+    expect(column('secret_hash')).toMatchObject({ notNull: true, hasDefault: true, default: '' })
+  })
 })
