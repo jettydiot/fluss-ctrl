@@ -1,6 +1,6 @@
 {
   "name": "@flussctrl/docs",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Developer docs: Astro Starlight guides and the Scalar API reference (placeholder).",
   "private": true,
   "type": "module",
