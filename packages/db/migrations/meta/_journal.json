@@ -15,6 +15,13 @@
       "when": 1795246780844,
       "tag": "0001_rls_roles_partitions",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1795855359433,
+      "tag": "0002_webhook_secret_enc",
+      "breakpoints": true
     }
   ]
 }

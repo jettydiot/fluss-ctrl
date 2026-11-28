@@ -26,7 +26,7 @@ Tables by phase (§5): 0–1 `organisations`, `clients`, `client_secrets`, membe
 - IDs: prefixed, URL-safe, globally unique: `org_…`, `site_…`, `ctl_…`, `dev_…`, `grp_…`, `sub_…`, `grt_…`, `cmd_…`, `evt_…`, `whk_…`, `cli_…`, `emg_…`. Use UUIDv7 under the prefix (sortable).
 - Timestamps: RFC 3339 UTC (`2026-10-14T12:00:00Z`). Durations in seconds. Schedules carry an IANA timezone.
 - Versioning: path (`/v1`). Additive changes do not bump. Breaking changes → `/v2` with a 12-month overlap. `oasdiff` enforces this in CI.
-- Idempotency: `Idempotency-Key` header (UUID) is **required** on `POST /devices/{id}/commands` and accepted on all other POSTs. Keys are scoped to the client. For commands the key lives on the command itself (`UNIQUE(org_id, client_id, idempotency_key)`), so it is honoured for as long as the command is retained (90 days, §14): a replay never actuates twice and returns the **current** state of the original command with `Idempotent-Replayed: true` (and honours `?wait=`). For other POSTs the response is stored for 24 h (`idempotency_keys`) and replayed as it was. The same key with a different request body is `422 idempotency_key_reused`; a replay that arrives while the original is still being accepted is `409 idempotency_in_progress`.
+- Idempotency: `Idempotency-Key` header (UUID) is **required** on `POST /devices/{id}/commands` and accepted on all other POSTs. Keys are scoped to the client. For commands the key lives on the command itself (`UNIQUE(org_id, client_id, idempotency_key)`), so it is honoured for as long as the command is retained (90 days, §14): a replay never actuates twice and returns the **current** state of the original command with `Idempotent-Replayed: true` (and honours `?wait=`). For other POSTs the response is stored for 24 h (`idempotency_keys`) and replayed as it was. The one exception is a secret that is shown once (a client secret, §3.1; a webhook signing secret, §8.2): the response is stored without it, so the secret is never written to `idempotency_keys`, and a replay returns the same response without that field. A caller that lost the original response issues a new secret. The same key with a different request body is `422 idempotency_key_reused`; a replay that arrives while the original is still being accepted is `409 idempotency_in_progress`.
 - Pagination: cursor-based. `?limit=` (default 50, max 200) and `?cursor=`. Responses: `{ "data": [...], "next_cursor": "…" | null }`.
 - Filtering: documented per list endpoint; always supports `?site_id=`.
 - Errors (RFC 9457 problem details):
@@ -227,8 +227,9 @@ Two modes, one active emergency per site at a time. Both are control-room featur
 - `POST /events/export` `{ filters, format: "json|csv" }` → async job, result URL delivered by webhook `export.completed` and in the console.
 
 ### Webhooks
-- `GET /webhooks`, `POST /webhooks` `{ url, event_types[], description }` → returns `secret` once.
-- `PATCH /webhooks/{id}`, `DELETE /webhooks/{id}`, `POST /webhooks/{id}/rotate-secret`, `POST /webhooks/{id}/test`.
+- `GET /webhooks`, `POST /webhooks` `{ url, event_types[], description }` → returns `secret` once. No other response includes a secret, not even a same-key replay of this one (§1, §8.2).
+- `PATCH /webhooks/{id}`, `DELETE /webhooks/{id}`, `POST /webhooks/{id}/test`.
+- `POST /webhooks/{id}/rotate-secret` → returns the new `secret` once, with `previous_secret_expires_at`: the old secret keeps signing until then (24 hours, §8.2).
 - `GET /webhooks/{id}/deliveries?status=`, `POST /webhooks/deliveries/{id}/replay`.
 
 ### Meta
@@ -301,14 +302,18 @@ events          id, org_id, site_id, device_id, subject_id, grant_id, command_id
                 -- `occurred_at` is device-reported and can be late or wrong: data, never a partition key.
 ingested_refs   org_id, controller_id, provider_event_ref, event_id, recorded_at
                 PRIMARY KEY (org_id, controller_id, provider_event_ref)   (ingest dedup, §8.1; pruned after 90 days)
-webhook_endpoints id, org_id, url, secret_hash, previous_secret_hash, previous_secret_expires_at,
+webhook_endpoints id, org_id, url, secret_enc, previous_secret_enc, previous_secret_expires_at,
                 event_types text[], status, failure_count, description
+                -- `secret_enc` is the signing secret, encrypted (see "Encryption" below; §8.2). HMAC is keyed
+                -- by the secret itself, so a hash cannot sign (ADR-0005).
+                -- `secret_hash` and `previous_secret_hash` from the first schema are unused: never read, and
+                -- left to an empty default on insert. A later release drops them (issue #46).
 site_emergencies id, org_id, site_id, mode, started_at, ended_at, reason, started_by, ended_by,
                 config_snapshot jsonb, outcome jsonb (per device)
 webhook_deliveries id, org_id, endpoint_id, event_id, event_recorded_at, attempt, status (pending|queued|delivered|failed|dead), response_code, next_attempt_at,
                 last_error, delivered_at  (partitioned monthly on created_at; 90-day retention)
                 -- written `pending` in the same transaction as the event (outbox, §8.2)
-idempotency_keys org_id, client_id, key, request_hash, response jsonb, expires_at   (non-command POSTs, 24 h; a command carries its own key)
+idempotency_keys org_id, client_id, key, request_hash, response jsonb, expires_at   (non-command POSTs, 24 h; a command carries its own key; never holds a secret, §1)
 usage_daily     org_id, day, device_months_fraction, controller_months_fraction, command_count, event_count
 metrics_daily   day, org_id|null, provider|null, metric, value   (rollups for the admin dashboard and the metrics feed)
 invoices        id, org_id, period_start, period_end, device_months, amount, currency, status (draft|sent|paid|overdue|void),
@@ -319,7 +324,11 @@ org_notes       id, org_id, author_id, text, at
 audit_log       id, org_id, actor_type, actor_id, action, target, reason, data jsonb, at
 ```
 
-Encryption: provider credentials encrypted with a per-region KMS-style key held in Workers secrets (envelope encryption, AES-GCM via WebCrypto). Secrets never logged.
+Encryption: a secret the system only has to check is stored as a hash (client secrets, §3.1). A secret the system has to use again is stored encrypted, in a column named `*_enc`, and nowhere else: provider credentials (`provider_links.credentials_enc`, `client_identity_enc`) and webhook signing secrets (`webhook_endpoints.secret_enc`, `previous_secret_enc`). Both use the same envelope encryption, AES-256-GCM via WebCrypto, with one implementation in `packages/core` (built by the first issue that writes one of these columns):
+- Each value is encrypted under its own random data key, and the data key is wrapped by the master key of the organisation's region: a per-region KMS-style key held in Workers secrets, never in the database, and escrowed (§21.4).
+- The stored value is one text string carrying a format version, the id of the master key that wrapped it, the wrapped data key, the nonces and the ciphertext. The key id is what lets a master key be rotated without downtime: new writes use the current key, an old value still opens with the key it names until a re-encryption pass has rewritten it, and only then is the old key removed (runbook "Key rotation and escrow").
+- Each value is bound, as AES-GCM additional data, to its organisation, its row and the kind of secret it is (a signing secret, a provider credential, a client identity), so a ciphertext copied to another organisation, another row or a column of another kind does not open. An endpoint's current and previous signing secret are the same kind, so a rotation moves the ciphertext from `secret_enc` to `previous_secret_enc` as it is (§8.2).
+- The plaintext exists only in memory, at the point of use (signing a delivery, calling a vendor). It is never logged, and never put in an event, an error, an audit entry or a queue message.
 
 ## 6. Grants and access types
 
@@ -460,7 +469,9 @@ Ingestion is idempotent and does not double-count. Every ingested entry is keyed
 ### 8.2 Delivery
 
 - Outbox: the event row and one `webhook_deliveries` row per matching endpoint (status `pending`) are inserted in the same database transaction as the state change that caused them. A dispatcher moves `pending` rows onto the queue: a best-effort enqueue straight after commit, backed by a Cron sweep every minute for anything left behind. A crash between commit and enqueue therefore delays a webhook and never loses it.
-- Standard Webhooks: headers `webhook-id`, `webhook-timestamp`, `webhook-signature` (`v1,<base64 HMAC-SHA256>`), secret shown once, rotation with overlap.
+- Standard Webhooks: headers `webhook-id`, `webhook-timestamp`, `webhook-signature` (`v1,<base64 HMAC-SHA256>`). The signature is HMAC-SHA256 over `<webhook-id>.<webhook-timestamp>.<body>`, keyed by the endpoint's signing secret.
+- Signing secret: generated by the API, never supplied by the caller. It is `whsec_` followed by 32 random bytes in base64, the Standard Webhooks format, so its libraries take it as it is; the HMAC key is those 32 bytes, not the text. It is shown once: `POST /webhooks` and `rotate-secret` return it, and no later response, event, log line or console page does. That includes an idempotent replay of either request, which is stored and returned without the secret (§1). HMAC needs the secret itself, so it is stored encrypted and not hashed (`webhook_endpoints.secret_enc`, §5 "Encryption"; ADR-0005). It is decrypted only where a delivery is signed, in memory, for that delivery. A delivery is never sent unsigned: if the current secret cannot be opened, the attempt fails and is retried like any other failure.
+- Rotation with overlap: `rotate-secret` generates a new secret and makes it current, and keeps the one it replaced as the previous secret (`previous_secret_enc`) for 24 hours (`previous_secret_expires_at`). One statement stores the new ciphertext and moves the old one across unopened: a rotation never decrypts a secret. Until then every delivery is signed with both, and `webhook-signature` carries the two signatures separated by a space, the current secret's first; a consumer verifying with either secret accepts the delivery, so it can deploy the new secret without losing one. A previous secret that cannot be opened is left out and the failure is logged as an error: the delivery goes out with the current secret's signature alone, so an unreadable previous secret never stops an endpoint. From the expiry on only the current secret signs and the previous one is never used again. An endpoint never has more than two valid secrets: rotating again inside the 24 hours replaces the previous secret, so the oldest stops signing at once. That is also the cost of losing a rotation's response: the caller has to rotate again to get a secret it can read (§1), and the one its consumer still holds stops signing, so the new one must be deployed straight away.
 - Body is the event envelope. One event per request. Deliveries ordered best-effort; consumers must be idempotent on `id`. `webhook-id` is the event id and stays the same across retries and replays.
 - Retries via Queues: 1 m, 5 m, 30 m, 2 h, 6 h, 24 h (6 attempts), then DLQ. Endpoint auto-disabled after 7 days of continuous failure (`webhook.endpoint_disabled` emitted to the org's other endpoints and shown in console). Manual and bulk replay from console or API.
 - Timeout per delivery 10 s; 2xx = success; 410 = disable endpoint immediately.
@@ -675,7 +686,7 @@ Phasing: Phase 2 ships the `/v1/admin/*` endpoints a beta needs (org list and de
 ## 14. Security, privacy and compliance
 
 - Transport: TLS only; HSTS; Cloudflare WAF and bot rules in front; mTLS optional for connectors.
-- Secrets: Workers secrets for signing/encryption keys; vendor credentials envelope-encrypted; never in logs (redaction middleware).
+- Secrets: Workers secrets for signing/encryption keys; vendor credentials and webhook signing secrets envelope-encrypted (§5 "Encryption"); never in logs (redaction middleware).
 - Data minimisation: subjects need only `external_id`; phone/email optional.
 - Retention: `organisations.retention_days` (default 365). Nightly Cron pseudonymises events older than retention (`subject_id → null`, `data` stripped of personal fields, `pseudonymised_at` set); commands and deliveries beyond 90 days deleted. Webhook deliveries 90 days.
 - Data subject rights: `GET /subjects/{id}/export`, `DELETE /subjects/{id}` → erasure job: subject row anonymised, grants revoked, events pseudonymised, erasure event emitted. Platform remains controller; Fluss Ctrl is processor (DPA template, legal review before GA).
@@ -805,7 +816,7 @@ Rules: a same-provider replica never counts as DR. Schema migrations are applied
 - Status page (OpenStatus) and the static incident page live outside Cloudflare.
 
 ### 21.4 Keys, accounts and escrow
-- JWT signing keys, envelope-encryption master keys and the provider-credential key are exported age-encrypted to an offline store with two key holders; rotation updates the escrow in the same runbook. Without this, a break-glass deployment cannot decrypt a single vendor credential.
+- JWT signing keys, envelope-encryption master keys and the provider-credential key are exported age-encrypted to an offline store with two key holders; rotation updates the escrow in the same runbook. Without this, a break-glass deployment cannot decrypt a single vendor credential or sign a single webhook.
 - Break-glass admin accounts on Cloudflare, Neon, GitHub, the registrar and the DNS secondary: hardware keys, stored offline, used only in incidents, every use audit-logged.
 
 ### 21.5 Degraded modes (the contract partners build against)

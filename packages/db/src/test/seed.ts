@@ -72,10 +72,19 @@ export async function seedOrg (db: Db): Promise<SeededOrg> {
     await tx.insert(s.events).values({ id: ids.eventId, orgId, type: 'command.requested', occurredAt: now, recordedAt: eventRecordedAt, commandId })
     await tx.insert(s.ingestedRefs).values({ orgId, controllerId: ids.controllerId, providerEventRef: 'ref-1', eventId: ids.eventId, recordedAt: now })
     await tx.insert(s.auditLog).values({ id: randomUUID(), orgId, actorType: 'client', actorId: ids.clientId, action: 'test.seed' })
-    await tx.insert(s.webhookEndpoints).values({ id: ids.endpointId, orgId, url: 'https://hooks.example.com/x', secretHash: 'h', eventTypes: ['command.requested'] })
+    await tx.insert(s.webhookEndpoints).values({ id: ids.endpointId, orgId, url: 'https://hooks.example.com/x', secretEnc: sealedForTest('seed'), eventTypes: ['command.requested'] })
     await tx.insert(s.webhookDeliveries).values({ id: randomUUID(), orgId, endpointId: ids.endpointId, eventId: ids.eventId, eventRecordedAt })
   })
   return ids
+}
+
+/**
+ * A stand-in for a sealed value (SPEC §5 "Encryption"), which the database stores as opaque text.
+ * Deliberately nothing like a key: a literal that looks like one beside the word "secret" trips
+ * the secret scanner, for every branch.
+ */
+export function sealedForTest (label: string): string {
+  return `sealed for test: ${label}`
 }
 
 /** Row counts per table, as the given transaction sees them. */
