@@ -50,7 +50,15 @@ function refill (tokens: number, updatedAt: number, policy: TokenBucketPolicy, a
  * there. A missing state is a full bucket. A clock that went backwards refills nothing (it never
  * drains the bucket either). A cost above capacity can never succeed, so it throws.
  *
- * When it refuses, the same call on the returned state at `nowMs + retryAfterMs` or later is allowed.
+ * A refused call takes nothing, so it returns the stored bucket as it was (clamped into range): not
+ * the refilled count, and not a new `updatedAt`. Every refill is then worked out in one step from
+ * the last call that took tokens, and a refusal cannot move what an earlier refusal promised (#40).
+ * The time a refused call saw is not kept either: if the clock steps back after one, the bucket
+ * holds what the new reading says it has earned, which can be less than that call reported.
+ *
+ * When it refuses, the same call at `nowMs + retryAfterMs` or later is allowed, however many other
+ * refused calls reach the bucket first. A call that is allowed in between takes tokens, and the
+ * wait no longer holds: that is how a shared bucket works.
  */
 export function takeTokens (
   state: TokenBucketState | undefined,
@@ -65,18 +73,18 @@ export function takeTokens (
   const start = state ? Math.min(policy.capacity, Math.max(0, state.tokens)) : policy.capacity
   const since = state ? state.updatedAt : nowMs
   const tokens = refill(start, since, policy, nowMs)
-  const updatedAt = Math.max(nowMs, since)
 
   if (tokens >= cost) {
     const left = tokens - cost
-    return { state: { tokens: left, updatedAt }, decision: { allowed: true, remaining: Math.floor(left), retryAfterMs: 0 } }
+    return { state: { tokens: left, updatedAt: Math.max(nowMs, since) }, decision: { allowed: true, remaining: Math.floor(left), retryAfterMs: 0 } }
   }
-  // After a clock step back, nothing refills until the clock passes updatedAt again, so add that gap.
-  const rollbackMs = Math.max(0, updatedAt - nowMs)
+  // After a clock step back, nothing refills until the clock passes `since` again, so add that gap.
+  const rollbackMs = Math.max(0, since - nowMs)
   let retryAfterMs = rollbackMs + Math.ceil(((cost - tokens) / policy.refillPerSecond) * 1000)
   // That division is only an estimate of what refill will add: the two round differently, and the
-  // estimate can land a millisecond short (#36). So hold it to the arithmetic the retry will run.
+  // estimate can land a millisecond short (#36). So hold it to the arithmetic the retry will run:
+  // one refill from the stored bucket, which this call leaves as it was.
   // One step is enough for any real policy; doubling the step keeps the loop finite for every policy.
-  for (let stepMs = 1; refill(tokens, updatedAt, policy, nowMs + retryAfterMs) < cost; stepMs *= 2) retryAfterMs += stepMs
-  return { state: { tokens, updatedAt }, decision: { allowed: false, remaining: Math.floor(tokens), retryAfterMs } }
+  for (let stepMs = 1; refill(start, since, policy, nowMs + retryAfterMs) < cost; stepMs *= 2) retryAfterMs += stepMs
+  return { state: { tokens: start, updatedAt: since }, decision: { allowed: false, remaining: Math.floor(tokens), retryAfterMs } }
 }

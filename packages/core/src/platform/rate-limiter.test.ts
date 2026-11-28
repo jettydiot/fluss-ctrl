@@ -19,6 +19,13 @@ describe('takeTokens', () => {
     expect(state).toEqual(empty)
   })
 
+  it('takes nothing when it refuses: the stored bucket stays as it was, and remaining is what it holds now', () => {
+    const stored: TokenBucketState = { tokens: 0.5, updatedAt: T0 }
+    const { state, decision } = takeTokens(stored, policy, 3, T0 + 250)
+    expect(decision).toEqual({ allowed: false, remaining: 1, retryAfterMs: 1000 })
+    expect(state).toEqual(stored)
+  })
+
   it('refills with elapsed time, up to capacity', () => {
     const empty: TokenBucketState = { tokens: 0, updatedAt: T0 }
     expect(takeTokens(empty, policy, 1, T0 + 500).decision.allowed).toBe(true)
@@ -39,6 +46,14 @@ describe('takeTokens', () => {
     expect(decision).toEqual({ allowed: false, remaining: 0, retryAfterMs: 60_500 })
     expect(takeTokens(state, policy, 1, now + decision.retryAfterMs).decision.allowed).toBe(true)
     expect(takeTokens(state, policy, 1, now + decision.retryAfterMs - 1).decision.allowed).toBe(false)
+  })
+
+  it('does not keep the time a refused call saw: after a step back, the bucket is what the clock says it has earned', () => {
+    const refused = takeTokens({ tokens: 0, updatedAt: T0 }, policy, 5, T0 + 1000)
+    expect(refused.decision).toEqual({ allowed: false, remaining: 2, retryAfterMs: 1500 })
+    // Back to T0 + 400: 0.8 tokens since the last call that took any, not the 2 seen at T0 + 1000.
+    expect(takeTokens(refused.state, policy, 1, T0 + 400).decision).toEqual({ allowed: false, remaining: 0, retryAfterMs: 100 })
+    expect(takeTokens(refused.state, policy, 1, T0 + 500).decision.allowed).toBe(true)
   })
 
   it('clamps a corrupt stored count into range', () => {
@@ -87,6 +102,18 @@ describe('takeTokens', () => {
     expect(takeTokens(state, glacial, 7, T0 + decision.retryAfterMs).decision.allowed).toBe(true)
   })
 
+  // #40: every call used to store the refilled count, a refused one too, so a refusal part-way
+  // through a wait split the refill into two rounded steps and the retry found 0.9999999999999999.
+  it('keeps a refusal\'s wait through other refused calls on the same bucket', () => {
+    const slow = { name: 'regression', capacity: 1, refillPerSecond: 0.01 }
+    const first = takeTokens({ tokens: 0, updatedAt: T0 }, slow, 1, T0)
+    expect(first.decision).toEqual({ allowed: false, remaining: 0, retryAfterMs: 100_000 })
+    const second = takeTokens(first.state, slow, 1, T0 + 1)
+    expect(second.decision.allowed).toBe(false)
+    expect(takeTokens(second.state, slow, 1, T0 + 100_000).decision.allowed).toBe(true)
+    expect(takeTokens(second.state, slow, 1, T0 + 99_999).decision.allowed).toBe(false)
+  })
+
   // A fresh random run, then the seeds of the two CI runs that found the examples above (#36). The
   // seeds replay those runs only while the arbitraries below stay as they are.
   it.each([
@@ -104,19 +131,30 @@ describe('takeTokens', () => {
         let taken = 0
         let latest = Number.NEGATIVE_INFINITY
         let first: number | undefined
+        // Refusals whose wait still stands: no call has taken tokens since.
+        let waiting: Array<{ cost: number, at: number }> = []
         for (const call of calls) {
           now += call.gapMs
           latest = Math.max(latest, now)
           first ??= now
           const cost = Math.min(call.cost, capacity)
+          const stored = state
           const result = takeTokens(state, p, cost, now)
           state = result.state
-          if (result.decision.allowed) taken += cost
+          if (result.decision.allowed) {
+            taken += cost
+            waiting = []
+          }
           expect(result.state.tokens).toBeGreaterThanOrEqual(0)
           expect(result.state.tokens).toBeLessThanOrEqual(capacity)
           if (!result.decision.allowed) {
             // Waiting exactly retryAfterMs is always enough.
             expect(takeTokens(state, p, cost, now + result.decision.retryAfterMs).decision.allowed).toBe(true)
+            // A refused call leaves the bucket as it was stored (#40), so the wait of every earlier
+            // refusal is still enough too, however many refused calls came after it.
+            expect(state).toEqual(stored)
+            for (const earlier of waiting) expect(takeTokens(state, p, earlier.cost, earlier.at).decision.allowed).toBe(true)
+            waiting.push({ cost, at: now + result.decision.retryAfterMs })
           }
         }
         // The bucket starts full at the first call; time only counts once the clock passes its high-water mark.
