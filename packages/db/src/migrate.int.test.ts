@@ -14,7 +14,7 @@ describe('migrations', () => {
   it('re-run as a no-op', async () => {
     await expect(runMigrations(createDb(owner))).resolves.toBeUndefined()
     const [row] = await owner<{ n: number }[]>`SELECT count(*)::int AS n FROM drizzle.__drizzle_migrations`
-    expect(row!.n).toBe(2)
+    expect(row!.n).toBe(3)
   })
 
   it('partition events by recorded_at and deliveries by created_at, monthly in UTC with a default', async () => {

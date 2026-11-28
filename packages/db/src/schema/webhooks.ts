@@ -4,6 +4,10 @@
 // default partition; the `PARTITION BY` clause is added by hand in the migration. It carries
 // `event_recorded_at` instead of a foreign key into the partitioned `events` table, so a lookup of
 // its event still prunes to one partition. `org_id` is denormalised for RLS (Thomas, issue #5).
+//
+// The signing secret is stored envelope-encrypted in `secret_enc` (SPEC §5 "Encryption", §8.2;
+// ADR-0005): Standard Webhooks signs with HMAC keyed by the secret itself, so a hash cannot sign.
+// The value is opaque text here; sealing and opening it is not this package's job.
 import { sql } from 'drizzle-orm'
 import { bigint, check, index, pgTable, primaryKey, text, unique, uuid } from 'drizzle-orm/pg-core'
 import { oneOf, orgId, prefixedId, sameOrg, timestamps, tstz } from './columns.ts'
@@ -14,9 +18,17 @@ export const webhookEndpoints = pgTable('webhook_endpoints', {
   id: text('id').primaryKey(),
   orgId: orgId().references(() => organisations.id),
   url: text('url').notNull(),
-  secretHash: text('secret_hash').notNull(),
-  previousSecretHash: text('previous_secret_hash'),
+  // Nullable only until the contract step (#46): every endpoint written from now on has one.
+  secretEnc: text('secret_enc'),
+  // The secret a rotation replaced. It signs alongside the current one until it expires (§8.2).
+  previousSecretEnc: text('previous_secret_enc'),
   previousSecretExpiresAt: tstz('previous_secret_expires_at'),
+  // Unused since #28: never read, and never written by new code. They stay so that a previous
+  // release's inserts keep working during a rollout, and a later release drops them (#46). The
+  // empty default is what lets an insert leave `secret_hash` out while it is still NOT NULL
+  // (squawk bans dropping NOT NULL: a reader of the old shape must never meet a NULL).
+  secretHash: text('secret_hash').notNull().default(''),
+  previousSecretHash: text('previous_secret_hash'),
   eventTypes: text('event_types').array().notNull().default(sql`'{}'::text[]`),
   status: text('status', { enum: WEBHOOK_ENDPOINT_STATUSES }).notNull().default('active'),
   failureCount: bigint('failure_count', { mode: 'number' }).notNull().default(0),
